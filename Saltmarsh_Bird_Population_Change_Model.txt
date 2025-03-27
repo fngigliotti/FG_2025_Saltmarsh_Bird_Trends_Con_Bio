@@ -1,0 +1,213 @@
+ 
+model {
+
+  ##########################
+  #Priors and Hyperpriors###
+  ##########################
+
+  for(v in 1:npatches){ #Random effect of patch on abundance (nested sampling)
+    patch.lambda[v] ~ dnorm(0, tau.patch)
+  }
+  sd.patch ~ dnorm(0, 0.01)T(0,) #Half-normal prior because of random effect structure assumption
+  tau.patch <- 1/(sd.patch*sd.patch)
+
+  for(n in 1:nobservers){ #Random effect of observer on detection
+    beta.observer[n] ~ dnorm(0, tau.observer) #Observers don't vary predictably in their 
+                                              #accuracy of detecting individuals of a given species
+  }
+  sd.observer ~ dnorm(0, 0.01)T(0,) #Half-normal prior because of random effect structure assumption
+  tau.observer <- 1/(sd.observer*sd.observer)
+
+  #State Trends
+  for(v in 1:10){ #Hierarchical structure of state on abundance trend (nested sampling, 10 states)
+    state.trend[v] ~ dnorm(mu.state, tau.state)
+  }
+  
+  #State Trend Hyperparameters
+  mu.state ~ dnorm(0, 0.01) #Average trend across all states
+  
+  sd.state ~ dnorm(0, 0.01)T(0,) #Half-normal prior because of random effect structure assumption
+  tau.state <- 1/(sd.state*sd.state)
+  
+  # *** Priors for model on lambda (abundance) *** 
+
+    #Intercept
+    alpha.lambda ~ dnorm(0, 0.01) 
+    
+    #Coefficients ('Global' Model)
+    for(v in 1:18){ #Coefficients get vague normal
+      beta.lambda[v] ~ dnorm(0, 0.01) #No yearly variation in prior for coef
+    }
+    
+  # *** Prior for model on omega (zero inflation) ***
+
+  omega ~ dunif(0,1) # zero inflation parameter / site occupancy probability 
+
+  # *** Priors for model on p (detection) ***
+ 
+    alpha.p ~ dnorm(0, 0.01) #Intercept
+    for(v in 1:8){ #8 covariates (noise, sunrise, sunrise^2, sky, temp, lat, j.day, lat:j.day)
+        beta.p[v] ~ dnorm(0, 0.01) #Coefficients get vague normal
+    }
+  
+  ######################
+  ###Model Likelihood###
+  ######################
+  
+  ###Ecological submodel: Define state conditional on parameters
+ 
+  ##Abundance
+  for(t in 1:nyears){
+    for(i in 1:nsites){
+      ##Zero-Inflation
+      zi[i,t]~dbern(omega) #Is species present at each sampled site in each year?
+
+      #Poisson w/ zero inflation 
+      N[i,t] ~ dpois(lambda[i,t]*zi[i,t]) 
+      
+      #Abundance link (w/ patch level random effect)
+       log(lambda[i,t]) <- alpha.lambda + beta.lambda[1]*latitudes[i] + beta.lambda[2]*pow(latitudes[i],2)
+                            + beta.lambda[3]*patch.area[patch.index[i]] + beta.lambda[4]*patch.road.dens[patch.index[i]]
+                            #Vegetation data (proportional cover of 8 cover types)
+                            + beta.lambda[5]*veg.props[i,1] + beta.lambda[6]*veg.props[i,2]
+                            + beta.lambda[7]*veg.props[i,3] + beta.lambda[8]*veg.props[i,4] 
+                            + beta.lambda[9]*veg.props[i,5] + beta.lambda[10]*veg.props[i,6]
+                            + beta.lambda[11]*veg.props[i,7] + beta.lambda[12]*veg.props[i,8] 
+                            #UVVR data (mean and trend in UVVR values)
+                            + beta.lambda[13]*UVVR[i,1] +  beta.lambda[14]*UVVR[i,2] 
+                            #Tidal data (SLR trend, maximum tidal amplitude, and restriction metrics)
+                            + beta.lambda[15]*tides[patch.index[i]] + beta.lambda[16]*max.tide[patch.index[i],year.index[t]]
+			                      + beta.lambda[17]*restrictions[i,1] + beta.lambda[18]*restrictions[i,2]
+                            #Add random patch effect and estimate state-level trend
+			                      + patch.lambda[patch.index[i]] + state.trend[state.index[i]]*(year.index[t]-6.5)
+    }#i
+  }#t
+ 
+  ###Observation model (incl. covariate effects)
+  
+  ##Detection (Derived by means of Time Removal Sampling):
+  for (i in 1:nsites){
+    for (j in 1:nsurveys){
+      for (t in 1:nyears){
+        #Log-link function for per-minute detection RATE
+        #Fixed effects of survey level detection covariates
+        log(p[i,j,t]) <- alpha.p + beta.p[1] * noise[i,j,t] + beta.p[2] * sunrise[i,j,t]
+                                    + beta.p[3] * pow(sunrise[i,j,t],2) + beta.p[4] * temp[i,j,t]
+                                    + beta.p[5] * sky[i,j,t]  + beta.p[6] * j.day[i,j,t]
+                                    + beta.p[7] * latitudes[i] + beta.p[8] * j.day[i,j,t] * latitudes[i]
+                                    + beta.observer[observer[i,j,t]] #Observer random effect
+
+        p.det[i,j,t] <- 1 - exp(-p[i,j,t]*nwindows) #detection probability (converted from detection rate)
+
+        #Per window detection probability (5, 1-minute detection windows per survey)
+        for (w in 1:nwindows){
+            pi[i,j,t,w] <- ((1-exp(-N[i,t]*p[i,j,t]*w*1/nwindows))-(1-exp(-N[i,t]*p[i,j,t]*(w-1)*1/nwindows))) 
+        }
+        pi[i,j,t,nwindows+1] <- exp(-N[i,t]*p[i,j,t]) #Probability of not detecting species on survey
+        
+        #categorical distribution for time-to-detection data
+        ttd[i,j,t] ~ dcat(pi[i,j,t,]) 
+	      log.lik0[i,j,t]<-logdensity.cat(ttd[i,j,t],pi[i,j,t,]) #log-likelihood for model
+          
+        # Model for censoring due to species absence and ttd>=Tmax
+        theta[i,j,t] <- (N[i,t]>0) * step(nwindows - ttd[i,j,t])
+        d[i,j,t] ~ dbern(theta[i,j,t])
+      }
+    }
+   log.lik[i]<-sum(log.lik0[i,,]) #log-likelihood at point level
+  }
+
+  ########################
+  ###Derived Parameters###
+  ########################
+ 
+  #Total population of species in each year
+  for(t in 1:nyears){
+    N.tot[t]<-sum(N[,t])
+  }#t
+  
+  #Population of species in each state in each year
+  for(t in 1:nyears){
+    for(i in 1:10){ #10 states surveyed
+      N.state[i,t]<-sum(state[,i]*N[,t])
+    }
+  }
+  
+  #Population trend of species across years (to compare to explict trend
+  #variable included in log-link function of abundance)
+  
+  N.trend.global<-((N.tot[nyears]/(N.tot[1]+1))^(1/11))-1 #Compare to mu.state
+  
+  #Population trend of species across years in each state (for context as explicit trend
+  #variable is not included in log-link function)
+  
+  for(i in 1:10){ #10 states
+    N.trend.state[i]<-((N.state[i,nyears]/(N.state[i,1]+1))^(1/11))-1 #compare to state.trend[state]
+  } 
+
+  mean.det <- mean(p.det) #mean detection probability across all sites / surveys / years
+
+###################################
+###Models for Missing Covariates###
+###################################
+
+##Assuming covariates are normally distributed and don't have differing means
+##among sites,years, or replicates (no reason to assume any relationships)
+
+#Detection Covariates
+for(i in 1:nsites){
+  for(j in 1:nsurveys){
+    for(t in 1:nyears){
+      noise[i,j,t] ~ dnorm(mu.noise,tau.noise)
+      sunrise[i,j,t] ~ dnorm(mu.sunrise,tau.sunrise)
+      sky[i,j,t] ~ dnorm(mu.sky,tau.sky)
+      temp[i,j,t] ~ dnorm(mu.temp,tau.temp)
+      j.day[i,j,t] ~ dnorm(mu.j.day,tau.j.day)
+    }
+  }
+}
+
+#Abundance Covariates
+for(i in 1:nsites){
+  restrictions[i,1] ~ dbern(mu.resbin) #Binary if restricted or not
+  restrictions[i,2] ~ dnorm(mu.restrict,tau.restrict) #Restriction Metric
+}
+
+##Priors for estimating missing covariates
+###Tighter priors used b/c very unlikely for large values 
+###as all were scaled to mean 0 and var 1 prior to entry into model
+
+#Noise
+mu.noise ~ dnorm(0, 0.1)
+sd.noise ~ dnorm(0, 0.1)T(0,)
+tau.noise <- 1/(sd.noise*sd.noise)
+
+#Sunrise
+mu.sunrise ~ dnorm(0, 0.1)
+sd.sunrise ~ dnorm(0, 0.1)T(0,)
+tau.sunrise <- 1/(sd.sunrise*sd.sunrise)
+
+#Sky
+mu.sky ~ dnorm(0, 0.1)
+sd.sky ~ dnorm(0, 0.1)T(0,)
+tau.sky <- 1/(sd.sky*sd.sky)
+
+#Temperature
+mu.temp ~ dnorm(0, 0.1)
+sd.temp ~ dnorm(0, 0.1)T(0,)
+tau.temp <- 1/(sd.temp*sd.temp)
+
+#Julian Day
+mu.j.day ~ dnorm(0, 0.1)
+sd.j.day ~ dnorm(0, 0.1)T(0,)
+tau.j.day <- 1/(sd.j.day*sd.j.day)
+
+#Restriction Metric
+mu.restrict ~ dnorm(0, 0.1)
+sd.restrict ~ dnorm(0, 0.1)T(0,)
+tau.restrict <- 1/(sd.restrict*sd.restrict)
+
+#Restriction Binary
+mu.resbin ~ dunif(0,1)
+
+}#END OF MODEL CODE
