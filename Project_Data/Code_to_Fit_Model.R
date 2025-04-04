@@ -2,7 +2,7 @@
 ###R Code to Fit JAGS Model for Population Trend Analysis###
 ############################################################
 
-##Gigliotti et al. 2025: Short-term stabilization of population 
+##Short-term stabilization of population 
 ##trends raises questions about the future of saltmarsh birds 
 ##in eastern North America
 
